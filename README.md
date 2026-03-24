@@ -20,5 +20,17 @@
 * **Платформа:** .NET / Windows Forms
 * **Данные:** Newtonsoft.Json (хранение данных и настроек в JSON)
 
+## 🚀 Установка и запуск
+
+1. Склонируйте репозиторий:
+   ```bash
+   git clone [https://github.com/VadimLevo/Deposit-Tracker.git](https://github.com/VadimLevo/Deposit-Tracker.git)
+   
+2. Откройте проект в Visual Studio.
+
+3. Убедитесь, что установлен пакет Newtonsoft.Json (через NuGet Package Manager).
+
+4. Нажмите F5 для компиляции и запуска.
+
 
 Программа распространяется "как есть". Все финансовые решения принимаются пользователем самостоятельно.
