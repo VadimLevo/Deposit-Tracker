@@ -5,18 +5,73 @@ using System.Drawing.Printing;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Security.Cryptography; // НОВОЕ: Для шифрования AES
 using System.Windows.Forms;
 using Newtonsoft.Json;
 
 namespace Учёт_Вкладов
 {
+    // === НОВЫЙ КЛАСС: КРИПТОГРАФИЧЕСКИЙ ПОМОЩНИК ===
+    public static class EncryptionHelper
+    {
+        // "Соль" для усиления ключа (фиксированная для простоты, но работает надежно)
+        private static readonly byte[] Salt = new byte[] { 0x49, 0x76, 0x61, 0x6e, 0x20, 0x4d, 0x65, 0x64, 0x76, 0x65, 0x64, 0x65, 0x76 };
+
+        public static string Encrypt(string clearText, string password)
+        {
+            if (string.IsNullOrEmpty(password)) return clearText;
+            byte[] clearBytes = Encoding.UTF8.GetBytes(clearText);
+            using (Aes encryptor = Aes.Create())
+            {
+                Rfc2898DeriveBytes pdb = new Rfc2898DeriveBytes(password, Salt, 10000);
+                encryptor.Key = pdb.GetBytes(32);
+                encryptor.IV = pdb.GetBytes(16);
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    using (CryptoStream cs = new CryptoStream(ms, encryptor.CreateEncryptor(), CryptoStreamMode.Write))
+                    {
+                        cs.Write(clearBytes, 0, clearBytes.Length);
+                    }
+                    return Convert.ToBase64String(ms.ToArray());
+                }
+            }
+        }
+
+        public static string Decrypt(string cipherText, string password)
+        {
+            if (string.IsNullOrEmpty(password)) return cipherText;
+            try
+            {
+                byte[] cipherBytes = Convert.FromBase64String(cipherText);
+                using (Aes encryptor = Aes.Create())
+                {
+                    Rfc2898DeriveBytes pdb = new Rfc2898DeriveBytes(password, Salt, 10000);
+                    encryptor.Key = pdb.GetBytes(32);
+                    encryptor.IV = pdb.GetBytes(16);
+                    using (MemoryStream ms = new MemoryStream())
+                    {
+                        using (CryptoStream cs = new CryptoStream(ms, encryptor.CreateDecryptor(), CryptoStreamMode.Write))
+                        {
+                            cs.Write(cipherBytes, 0, cipherBytes.Length);
+                        }
+                        return Encoding.UTF8.GetString(ms.ToArray());
+                    }
+                }
+            }
+            catch { return ""; } // Если пароль не подошел или файл сломан
+        }
+    }
+    // ===============================================
+
     public class AppSettings
     {
         public Dictionary<string, int> ColumnWidths { get; set; } = new Dictionary<string, int>();
         public Dictionary<string, int> ArchiveColumnWidths { get; set; } = new Dictionary<string, int>();
         public double GlobalKeyRate { get; set; } = 16.0;
 
-        // Добавили координаты (X, Y) для сохранения положения окна на мониторе
+        // Хранилище хеша пароля
+        public string PasswordHash { get; set; } = "";
+
         public int WindowLeft { get; set; } = -1;
         public int WindowTop { get; set; } = -1;
         public int WindowWidth { get; set; } = 1200;
@@ -43,6 +98,9 @@ namespace Учёт_Вкладов
         private List<Deposit> allDeposits = new List<Deposit>();
         private AppSettings settings = new AppSettings();
 
+        // НОВОЕ: Переменная, хранящая расшифрованный пароль только в оперативной памяти!
+        private string _sessionPassword = "";
+
         private int _printRowIndex = 0;
         private bool _printingTotals = false;
 
@@ -50,10 +108,22 @@ namespace Учёт_Вкладов
         {
             InitializeComponent();
 
-            // 1. Читаем настройки ДО создания интерфейса
             PreLoadSettings();
 
-            // 2. Строим интерфейс с уже известными размерами
+            // ПРОВЕРКА ПАРОЛЯ ПЕРЕД ЗАПУСКОМ
+            if (!string.IsNullOrEmpty(settings.PasswordHash))
+            {
+                using (var loginForm = new PasswordForm(settings.PasswordHash, false))
+                {
+                    if (loginForm.ShowDialog() != DialogResult.OK)
+                    {
+                        Environment.Exit(0);
+                    }
+                    // ПОЛУЧАЕМ ПАРОЛЬ ОТ ОКНА ВХОДА ДЛЯ РАСШИФРОВКИ БАЗЫ
+                    _sessionPassword = loginForm.EnteredPassword;
+                }
+            }
+
             InitializeCustomUI();
 
             this.Load += Form1_Load;
@@ -70,7 +140,7 @@ namespace Учёт_Вкладов
                     var loadedSettings = JsonConvert.DeserializeObject<AppSettings>(json);
                     if (loadedSettings != null) settings = loadedSettings;
                 }
-                catch { } // Игнорируем ошибки (если файл сломан, используем стандартные настройки)
+                catch { }
             }
         }
 
@@ -78,19 +148,13 @@ namespace Учёт_Вкладов
         {
             this.Controls.Clear();
 
-            this.Text = "Учёт Вкладов v1.0";
-            try
-            {
-                this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-            }
-            catch { }
+            this.Text = "Учёт Вкладов";
+            try { this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             this.MinimumSize = new Size(1000, 450);
 
-            // --- ПРИМЕНЯЕМ ПОЗИЦИЮ И РАЗМЕР ОКНА ---
             bool isVisibleOnAnyScreen = false;
             if (settings.WindowLeft != -1 && settings.WindowTop != -1)
             {
-                // Проверяем, не улетело ли окно за пределы монитора (например, если отключили второй экран)
                 foreach (Screen screen in Screen.AllScreens)
                 {
                     if (screen.WorkingArea.IntersectsWith(new Rectangle(settings.WindowLeft, settings.WindowTop, 10, 10)))
@@ -108,11 +172,9 @@ namespace Учёт_Вкладов
             }
             else
             {
-                // Если запуск первый раз или окно вне экрана - центрируем
                 this.StartPosition = FormStartPosition.CenterScreen;
                 this.Size = new Size(1200, 600);
             }
-            // --------------------------------------
 
             pnlTop = new Panel();
             dgvDeposits = new DataGridView();
@@ -152,6 +214,11 @@ namespace Учёт_Вкладов
             };
             pnlTop.Controls.Add(btnClearFilter);
 
+            // КНОПКА ЗАДАНИЯ ПАРОЛЯ В ПРАВОМ ВЕРХНЕМ УГЛУ
+            Button btnPassword = new Button { Text = "🔒 Пароль", Location = new Point(pnlTop.Width - 110, 10), Width = 90, Height = 25, Anchor = AnchorStyles.Top | AnchorStyles.Right, BackColor = Color.LightYellow, FlatStyle = FlatStyle.Flat };
+            btnPassword.Click += BtnPassword_Click;
+            pnlTop.Controls.Add(btnPassword);
+
             // НИЖНЯЯ ПАНЕЛЬ
             pnlBottom.Dock = DockStyle.Bottom;
             pnlBottom.Height = 150;
@@ -166,7 +233,7 @@ namespace Учёт_Вкладов
             this.Controls.Add(dgvDeposits);
             dgvDeposits.BringToFront();
 
-            // ИТОГИ В НИЖНЕЙ ПАНЕЛИ
+            // ИТОГИ
             txtTotal.Multiline = true;
             txtTotal.ReadOnly = true;
             txtTotal.ScrollBars = ScrollBars.Vertical;
@@ -221,15 +288,46 @@ namespace Учёт_Вкладов
             pnlBottom.Controls.Add(btnPrint);
         }
 
+        private void BtnPassword_Click(object sender, EventArgs e)
+        {
+            // Открываем окно в режиме "Настройка" (true)
+            using (var pf = new PasswordForm(settings.PasswordHash, true))
+            {
+                if (pf.ShowDialog() == DialogResult.OK)
+                {
+                    settings.PasswordHash = pf.NewHash;
+                    _sessionPassword = pf.EnteredPassword; // Обновляем сессионный ключ
+
+                    SaveSettings();
+                    SaveData(); // СРАЗУ ПЕРЕЗАПИСЫВАЕМ БАЗУ С НОВЫМ ШИФРОВАНИЕМ!
+
+                    string msg = string.IsNullOrEmpty(pf.NewHash) ? "Пароль успешно отключен! База расшифрована." : "Новый пароль установлен! База данных зашифрована.";
+                    MessageBox.Show(msg, "Безопасность", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+        }
+
         private void Form1_Load(object sender, EventArgs e)
         {
-            // Применяем статус окна (на весь экран или нормальное)
             this.WindowState = settings.WindowState == FormWindowState.Minimized ? FormWindowState.Normal : settings.WindowState;
 
             SetupGridColumns();
-            ApplySettingsToGrid(); // Восстанавливаем ставку и ширину колонок
+            ApplySettingsToGrid();
             LoadData();
             dgvDeposits.CellValueChanged += DgvDeposits_CellValueChanged;
+
+            // НОВАЯ СТРОКА: подписываемся на мгновенное изменение ячейки
+            dgvDeposits.CurrentCellDirtyStateChanged += DgvDeposits_CurrentCellDirtyStateChanged;
+        }
+
+        // НОВЫЙ МЕТОД (можно вставить сразу под Form1_Load)
+        private void DgvDeposits_CurrentCellDirtyStateChanged(object sender, EventArgs e)
+        {
+            if (dgvDeposits.IsCurrentCellDirty && dgvDeposits.CurrentCell is DataGridViewCheckBoxCell)
+            {
+                // Заставляем таблицу мгновенно применить изменение галочки
+                dgvDeposits.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            }
         }
 
         private void SetupGridColumns()
@@ -243,7 +341,7 @@ namespace Учёт_Вкладов
             dgvDeposits.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
 
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "Id", DataPropertyName = "Id", Visible = false });
-            dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "Bank", HeaderText = "Банк", DataPropertyName = "Bank", ReadOnly = true, Width = 150 });
+            dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "Bank", HeaderText = "Банк/Компания", DataPropertyName = "Bank", ReadOnly = true, Width = 150 });
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "Owner", HeaderText = "Владелец", DataPropertyName = "Owner", ReadOnly = true, Width = 100 });
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "Amount", HeaderText = "Сумма", DataPropertyName = "Amount", DefaultCellStyle = new DataGridViewCellStyle { Format = "N2" }, Width = 120 });
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "Currency", HeaderText = "Валюта", DataPropertyName = "Currency", ReadOnly = true, Width = 70 });
@@ -252,6 +350,9 @@ namespace Учёт_Вкладов
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "EffectiveRateString", HeaderText = "Эфф. ставка %", DataPropertyName = "EffectiveRateString", ReadOnly = true, Width = 100 });
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "EndDateString", HeaderText = "Окончание", DataPropertyName = "EndDateString", ReadOnly = true, Width = 100 });
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "DaysLeft", HeaderText = "Дней осталось", DataPropertyName = "DaysLeft", ReadOnly = true, Width = 100 });
+            // Столбец даты и столбец галочек ===
+            dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "LastReconciled", HeaderText = "Сверено", DataPropertyName = "LastReconciledString", ReadOnly = true, Width = 80 });
+            dgvDeposits.Columns.Add(new DataGridViewCheckBoxColumn { Name = "ReconcileCheck", HeaderText = "✓", DataPropertyName = "IsReconciledSession", Width = 30 });
         }
 
         private void ApplySettingsToGrid()
@@ -264,19 +365,51 @@ namespace Учёт_Вкладов
             numGlobalKeyRate.Value = (decimal)Deposit.CurrentKeyRate;
         }
 
+        // === ОБНОВЛЕНО: Чтение с расшифровкой ===
         private void LoadData()
         {
             if (File.Exists(filePath))
             {
-                var json = File.ReadAllText(filePath);
-                allDeposits = JsonConvert.DeserializeObject<List<Deposit>>(json) ?? new List<Deposit>();
+                string rawText = File.ReadAllText(filePath);
+                string jsonToParse = rawText;
+
+                // Жесткая очистка от невидимых символов (BOM), которые Windows любит добавлять в начало файлов
+                string cleanText = rawText.Trim('\uFEFF', '\u200B').TrimStart();
+
+                // Если текст начинается с квадратной скобки, это 100% открытый старый файл
+                bool isUnencryptedJson = cleanText.StartsWith("[");
+
+                // Если это не открытый JSON и у нас в памяти есть пароль - расшифровываем
+                if (!isUnencryptedJson && !string.IsNullOrEmpty(_sessionPassword))
+                {
+                    jsonToParse = EncryptionHelper.Decrypt(rawText, _sessionPassword);
+                }
+
+                try
+                {
+                    allDeposits = JsonConvert.DeserializeObject<List<Deposit>>(jsonToParse) ?? new List<Deposit>();
+                }
+                catch (Exception ex)
+                {
+                    // Теперь программа точно скажет, какое именно слово или символ ей не понравились!
+                    MessageBox.Show($"Не удалось прочитать базу.\n\nТехническая деталь:\n{ex.Message}", "Ошибка чтения", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    allDeposits = new List<Deposit>();
+                }
             }
             RefreshGrid();
         }
 
+        // === ОБНОВЛЕНО: Запись с шифрованием ===
         private void SaveData()
         {
             var json = JsonConvert.SerializeObject(allDeposits, Formatting.Indented);
+
+            // Если пароль установлен, шифруем JSON перед записью
+            if (!string.IsNullOrEmpty(_sessionPassword))
+            {
+                json = EncryptionHelper.Encrypt(json, _sessionPassword);
+            }
+
             File.WriteAllText(filePath, json);
         }
 
@@ -288,7 +421,6 @@ namespace Учёт_Вкладов
             }
             settings.GlobalKeyRate = Deposit.CurrentKeyRate;
 
-            // Записываем правильные координаты и размеры при выходе
             if (this.WindowState == FormWindowState.Normal)
             {
                 settings.WindowLeft = this.Left;
@@ -312,7 +444,6 @@ namespace Учёт_Вкладов
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            // Обязательно сохраняем настройки, когда пользователь нажимает крестик
             SaveSettings();
         }
 
@@ -365,7 +496,7 @@ namespace Учёт_Вкладов
             if (cmbFilterCurrency.SelectedIndex > 0)
                 activeDeposits = activeDeposits.Where(d => d.Currency == cmbFilterCurrency.SelectedItem.ToString()).ToList();
 
-            activeDeposits = activeDeposits.OrderBy(d => d.DaysLeft).ToList();
+            activeDeposits = activeDeposits.OrderBy(d => d.IsOPIF || d.IsPerpetual || !d.EndDate.HasValue ? int.MaxValue : (d.EndDate.Value - DateTime.Today).Days).ToList();
 
             dgvDeposits.CellValueChanged -= DgvDeposits_CellValueChanged;
             dgvDeposits.DataSource = null;
@@ -395,10 +526,32 @@ namespace Учёт_Вкладов
 
         private void DgvDeposits_CellValueChanged(object sender, DataGridViewCellEventArgs e)
         {
-            if (e.RowIndex >= 0 && dgvDeposits.Columns[e.ColumnIndex].Name == "Amount")
+            if (e.RowIndex >= 0)
             {
-                SaveData();
-                RefreshGrid();
+                string colName = dgvDeposits.Columns[e.ColumnIndex].Name;
+
+                // Если изменили сумму вручную
+                if (colName == "Amount")
+                {
+                    SaveData();
+                    RefreshGrid();
+                }
+                // Если кликнули по галочке сверки
+                else if (colName == "ReconcileCheck")
+                {
+                    bool isChecked = (bool)dgvDeposits.Rows[e.RowIndex].Cells[e.ColumnIndex].Value;
+                    if (isChecked)
+                    {
+                        Guid id = (Guid)dgvDeposits.Rows[e.RowIndex].Cells["Id"].Value;
+                        var deposit = allDeposits.FirstOrDefault(d => d.Id == id);
+                        if (deposit != null)
+                        {
+                            deposit.LastReconciled = DateTime.Today; // Обновляем дату на сегодня
+                            SaveData();      // Сохраняем базу
+                            RefreshGrid();   // Обновляем визуальную таблицу
+                        }
+                    }
+                }
             }
         }
 
@@ -468,13 +621,11 @@ namespace Учёт_Вкладов
 
         private void BtnArchive_Click(object sender, EventArgs e)
         {
-            // Передаем текущие настройки (settings) внутрь архива
             using (var archiveForm = new ArchiveForm(allDeposits, settings, () => { SaveData(); RefreshGrid(); }))
             {
                 archiveForm.ShowDialog();
             }
 
-            // Сразу сохраняем файл на диск, как только окно архива закрылось
             SaveSettings();
         }
 
@@ -504,9 +655,8 @@ namespace Учёт_Вкладов
         private void BtnPrint_Click(object sender, EventArgs e)
         {
             PrintDocument pd = new PrintDocument();
-            pd.DefaultPageSettings.Landscape = true; // Альбомная ориентация
+            pd.DefaultPageSettings.Landscape = true;
 
-            // Сбрасываем счетчики перед началом каждой новой печати
             pd.BeginPrint += (s, ev) =>
             {
                 _printRowIndex = 0;
@@ -533,18 +683,15 @@ namespace Учёт_Вкладов
             Graphics g = e.Graphics;
             Font headerFont = new Font("Segoe UI", 10, FontStyle.Bold);
             Font rowFont = new Font("Segoe UI", 9);
-            Font italicFont = new Font("Segoe UI", 9, FontStyle.Italic); // Шрифт для колонтитула
+            Font italicFont = new Font("Segoe UI", 9, FontStyle.Italic);
 
             int y = 50;
             int x = 40;
             int bottomMargin = e.PageBounds.Height - 60;
 
-            // === НОВОЕ: КОЛОНТИТУЛ С ДАТОЙ НА КАЖДОЙ СТРАНИЦЕ ===
             string dateText = $"Дата формирования: {DateTime.Now.ToShortDateString()}";
             SizeF dateSize = g.MeasureString(dateText, italicFont);
-            // Рисуем в правом верхнем углу (отступ 40 от правого края, 20 сверху)
             g.DrawString(dateText, italicFont, Brushes.DimGray, e.PageBounds.Width - dateSize.Width - 40, 20);
-            // ===================================================
 
             if (_printRowIndex == 0 && !_printingTotals)
             {
