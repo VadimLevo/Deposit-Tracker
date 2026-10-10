@@ -5,16 +5,14 @@ using System.Drawing.Printing;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Security.Cryptography; // НОВОЕ: Для шифрования AES
+using System.Security.Cryptography;
 using System.Windows.Forms;
 using Newtonsoft.Json;
 
 namespace Учёт_Вкладов
 {
-    // === НОВЫЙ КЛАСС: КРИПТОГРАФИЧЕСКИЙ ПОМОЩНИК ===
     public static class EncryptionHelper
     {
-        // "Соль" для усиления ключа (фиксированная для простоты, но работает надежно)
         private static readonly byte[] Salt = new byte[] { 0x49, 0x76, 0x61, 0x6e, 0x20, 0x4d, 0x65, 0x64, 0x76, 0x65, 0x64, 0x65, 0x76 };
 
         public static string Encrypt(string clearText, string password)
@@ -58,10 +56,9 @@ namespace Учёт_Вкладов
                     }
                 }
             }
-            catch { return ""; } // Если пароль не подошел или файл сломан
+            catch { return ""; }
         }
     }
-    // ===============================================
 
     public class AppSettings
     {
@@ -69,7 +66,6 @@ namespace Учёт_Вкладов
         public Dictionary<string, int> ArchiveColumnWidths { get; set; } = new Dictionary<string, int>();
         public double GlobalKeyRate { get; set; } = 16.0;
 
-        // Хранилище хеша пароля
         public string PasswordHash { get; set; } = "";
 
         public int WindowLeft { get; set; } = -1;
@@ -85,6 +81,7 @@ namespace Учёт_Вкладов
         private ComboBox cmbFilterBank;
         private ComboBox cmbFilterOwner;
         private ComboBox cmbFilterCurrency;
+        private ComboBox cmbFilterReconciled; // НОВЫЙ ФИЛЬТР
         private bool isUpdatingFilters = false;
 
         private DataGridView dgvDeposits;
@@ -98,7 +95,6 @@ namespace Учёт_Вкладов
         private List<Deposit> allDeposits = new List<Deposit>();
         private AppSettings settings = new AppSettings();
 
-        // НОВОЕ: Переменная, хранящая расшифрованный пароль только в оперативной памяти!
         private string _sessionPassword = "";
 
         private int _printRowIndex = 0;
@@ -110,7 +106,6 @@ namespace Учёт_Вкладов
 
             PreLoadSettings();
 
-            // ПРОВЕРКА ПАРОЛЯ ПЕРЕД ЗАПУСКОМ
             if (!string.IsNullOrEmpty(settings.PasswordHash))
             {
                 using (var loginForm = new PasswordForm(settings.PasswordHash, false))
@@ -119,7 +114,6 @@ namespace Учёт_Вкладов
                     {
                         Environment.Exit(0);
                     }
-                    // ПОЛУЧАЕМ ПАРОЛЬ ОТ ОКНА ВХОДА ДЛЯ РАСШИФРОВКИ БАЗЫ
                     _sessionPassword = loginForm.EnteredPassword;
                 }
             }
@@ -150,7 +144,7 @@ namespace Учёт_Вкладов
 
             this.Text = "Учёт Вкладов";
             try { this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
-            this.MinimumSize = new Size(1000, 450);
+            this.MinimumSize = new Size(1100, 450);
 
             bool isVisibleOnAnyScreen = false;
             if (settings.WindowLeft != -1 && settings.WindowTop != -1)
@@ -203,18 +197,26 @@ namespace Учёт_Вкладов
             cmbFilterCurrency.SelectedIndexChanged += Filter_Changed;
             pnlTop.Controls.Add(cmbFilterCurrency);
 
-            Button btnClearFilter = new Button { Text = "Сбросить", Location = new Point(520, 10), Width = 80, Height = 25, BackColor = Color.LightGray, FlatStyle = FlatStyle.Flat };
+            // НОВОЕ: Фильтр сверки
+            cmbFilterReconciled = new ComboBox { Location = new Point(520, 11), Width = 110, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbFilterReconciled.Items.AddRange(new[] { "Все", "Сверено", "Не сверено" });
+            cmbFilterReconciled.SelectedIndex = 0;
+            cmbFilterReconciled.SelectedIndexChanged += Filter_Changed;
+            pnlTop.Controls.Add(cmbFilterReconciled);
+
+            // Сдвинули кнопку сброса
+            Button btnClearFilter = new Button { Text = "Сбросить", Location = new Point(640, 10), Width = 80, Height = 25, BackColor = Color.LightGray, FlatStyle = FlatStyle.Flat };
             btnClearFilter.Click += (s, e) => {
                 isUpdatingFilters = true;
                 if (cmbFilterBank.Items.Count > 0) cmbFilterBank.SelectedIndex = 0;
                 if (cmbFilterOwner.Items.Count > 0) cmbFilterOwner.SelectedIndex = 0;
                 if (cmbFilterCurrency.Items.Count > 0) cmbFilterCurrency.SelectedIndex = 0;
+                cmbFilterReconciled.SelectedIndex = 0; // Сброс нового фильтра
                 isUpdatingFilters = false;
                 RefreshGrid();
             };
             pnlTop.Controls.Add(btnClearFilter);
 
-            // КНОПКА ЗАДАНИЯ ПАРОЛЯ В ПРАВОМ ВЕРХНЕМ УГЛУ
             Button btnPassword = new Button { Text = "🔒 Пароль", Location = new Point(pnlTop.Width - 110, 10), Width = 90, Height = 25, Anchor = AnchorStyles.Top | AnchorStyles.Right, BackColor = Color.LightYellow, FlatStyle = FlatStyle.Flat };
             btnPassword.Click += BtnPassword_Click;
             pnlTop.Controls.Add(btnPassword);
@@ -290,16 +292,15 @@ namespace Учёт_Вкладов
 
         private void BtnPassword_Click(object sender, EventArgs e)
         {
-            // Открываем окно в режиме "Настройка" (true)
             using (var pf = new PasswordForm(settings.PasswordHash, true))
             {
                 if (pf.ShowDialog() == DialogResult.OK)
                 {
                     settings.PasswordHash = pf.NewHash;
-                    _sessionPassword = pf.EnteredPassword; // Обновляем сессионный ключ
+                    _sessionPassword = pf.EnteredPassword;
 
                     SaveSettings();
-                    SaveData(); // СРАЗУ ПЕРЕЗАПИСЫВАЕМ БАЗУ С НОВЫМ ШИФРОВАНИЕМ!
+                    SaveData();
 
                     string msg = string.IsNullOrEmpty(pf.NewHash) ? "Пароль успешно отключен! База расшифрована." : "Новый пароль установлен! База данных зашифрована.";
                     MessageBox.Show(msg, "Безопасность", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -314,18 +315,16 @@ namespace Учёт_Вкладов
             SetupGridColumns();
             ApplySettingsToGrid();
             LoadData();
-            dgvDeposits.CellValueChanged += DgvDeposits_CellValueChanged;
 
-            // НОВАЯ СТРОКА: подписываемся на мгновенное изменение ячейки
+            dgvDeposits.CellValueChanged += DgvDeposits_CellValueChanged;
+            // Мгновенная реакция галочек
             dgvDeposits.CurrentCellDirtyStateChanged += DgvDeposits_CurrentCellDirtyStateChanged;
         }
 
-        // НОВЫЙ МЕТОД (можно вставить сразу под Form1_Load)
         private void DgvDeposits_CurrentCellDirtyStateChanged(object sender, EventArgs e)
         {
             if (dgvDeposits.IsCurrentCellDirty && dgvDeposits.CurrentCell is DataGridViewCheckBoxCell)
             {
-                // Заставляем таблицу мгновенно применить изменение галочки
                 dgvDeposits.CommitEdit(DataGridViewDataErrorContexts.Commit);
             }
         }
@@ -350,7 +349,8 @@ namespace Учёт_Вкладов
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "EffectiveRateString", HeaderText = "Эфф. ставка %", DataPropertyName = "EffectiveRateString", ReadOnly = true, Width = 100 });
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "EndDateString", HeaderText = "Окончание", DataPropertyName = "EndDateString", ReadOnly = true, Width = 100 });
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "DaysLeft", HeaderText = "Дней осталось", DataPropertyName = "DaysLeft", ReadOnly = true, Width = 100 });
-            // Столбец даты и столбец галочек ===
+
+            // Столбцы сверки
             dgvDeposits.Columns.Add(new DataGridViewTextBoxColumn { Name = "LastReconciled", HeaderText = "Сверено", DataPropertyName = "LastReconciledString", ReadOnly = true, Width = 80 });
             dgvDeposits.Columns.Add(new DataGridViewCheckBoxColumn { Name = "ReconcileCheck", HeaderText = "✓", DataPropertyName = "IsReconciledSession", Width = 30 });
         }
@@ -365,7 +365,6 @@ namespace Учёт_Вкладов
             numGlobalKeyRate.Value = (decimal)Deposit.CurrentKeyRate;
         }
 
-        // === ОБНОВЛЕНО: Чтение с расшифровкой ===
         private void LoadData()
         {
             if (File.Exists(filePath))
@@ -373,13 +372,9 @@ namespace Учёт_Вкладов
                 string rawText = File.ReadAllText(filePath);
                 string jsonToParse = rawText;
 
-                // Жесткая очистка от невидимых символов (BOM), которые Windows любит добавлять в начало файлов
                 string cleanText = rawText.Trim('\uFEFF', '\u200B').TrimStart();
-
-                // Если текст начинается с квадратной скобки, это 100% открытый старый файл
                 bool isUnencryptedJson = cleanText.StartsWith("[");
 
-                // Если это не открытый JSON и у нас в памяти есть пароль - расшифровываем
                 if (!isUnencryptedJson && !string.IsNullOrEmpty(_sessionPassword))
                 {
                     jsonToParse = EncryptionHelper.Decrypt(rawText, _sessionPassword);
@@ -391,7 +386,6 @@ namespace Учёт_Вкладов
                 }
                 catch (Exception ex)
                 {
-                    // Теперь программа точно скажет, какое именно слово или символ ей не понравились!
                     MessageBox.Show($"Не удалось прочитать базу.\n\nТехническая деталь:\n{ex.Message}", "Ошибка чтения", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     allDeposits = new List<Deposit>();
                 }
@@ -399,12 +393,10 @@ namespace Учёт_Вкладов
             RefreshGrid();
         }
 
-        // === ОБНОВЛЕНО: Запись с шифрованием ===
         private void SaveData()
         {
             var json = JsonConvert.SerializeObject(allDeposits, Formatting.Indented);
 
-            // Если пароль установлен, шифруем JSON перед записью
             if (!string.IsNullOrEmpty(_sessionPassword))
             {
                 json = EncryptionHelper.Encrypt(json, _sessionPassword);
@@ -483,6 +475,13 @@ namespace Учёт_Вкладов
 
         private void RefreshGrid()
         {
+            // ЗАПОМИНАЕМ ВЫДЕЛЕНИЕ
+            Guid? selectedId = null;
+            if (dgvDeposits.CurrentRow != null && dgvDeposits.CurrentRow.Cells["Id"].Value != null)
+            {
+                selectedId = (Guid)dgvDeposits.CurrentRow.Cells["Id"].Value;
+            }
+
             UpdateFilterDropdowns();
 
             var activeDeposits = allDeposits.Where(d => !d.IsClosed).ToList();
@@ -496,12 +495,32 @@ namespace Учёт_Вкладов
             if (cmbFilterCurrency.SelectedIndex > 0)
                 activeDeposits = activeDeposits.Where(d => d.Currency == cmbFilterCurrency.SelectedItem.ToString()).ToList();
 
+            // ФИЛЬТР СВЕРКИ
+            if (cmbFilterReconciled.SelectedIndex == 1)
+                activeDeposits = activeDeposits.Where(d => d.IsReconciledSession).ToList();
+            else if (cmbFilterReconciled.SelectedIndex == 2)
+                activeDeposits = activeDeposits.Where(d => !d.IsReconciledSession).ToList();
+
             activeDeposits = activeDeposits.OrderBy(d => d.IsOPIF || d.IsPerpetual || !d.EndDate.HasValue ? int.MaxValue : (d.EndDate.Value - DateTime.Today).Days).ToList();
 
             dgvDeposits.CellValueChanged -= DgvDeposits_CellValueChanged;
             dgvDeposits.DataSource = null;
             dgvDeposits.DataSource = activeDeposits;
             dgvDeposits.CellValueChanged += DgvDeposits_CellValueChanged;
+
+            // ВОССТАНАВЛИВАЕМ ВЫДЕЛЕНИЕ
+            if (selectedId.HasValue)
+            {
+                foreach (DataGridViewRow row in dgvDeposits.Rows)
+                {
+                    if ((Guid)row.Cells["Id"].Value == selectedId.Value)
+                    {
+                        dgvDeposits.CurrentCell = row.Cells["Bank"];
+                        row.Selected = true;
+                        break;
+                    }
+                }
+            }
 
             var totalSummary = activeDeposits.GroupBy(d => d.Currency).Select(g => $"ИТОГО: {g.Sum(s => s.Amount):N2} {g.Key}");
             var ownerBankSummary = activeDeposits.GroupBy(d => new { d.Owner, d.Bank, d.Currency }).Select(g => $"• {g.Key.Owner} ({g.Key.Bank}): {g.Sum(s => s.Amount):N2} {g.Key.Currency}");
@@ -530,13 +549,11 @@ namespace Учёт_Вкладов
             {
                 string colName = dgvDeposits.Columns[e.ColumnIndex].Name;
 
-                // Если изменили сумму вручную
                 if (colName == "Amount")
                 {
                     SaveData();
                     RefreshGrid();
                 }
-                // Если кликнули по галочке сверки
                 else if (colName == "ReconcileCheck")
                 {
                     bool isChecked = (bool)dgvDeposits.Rows[e.RowIndex].Cells[e.ColumnIndex].Value;
@@ -546,9 +563,9 @@ namespace Учёт_Вкладов
                         var deposit = allDeposits.FirstOrDefault(d => d.Id == id);
                         if (deposit != null)
                         {
-                            deposit.LastReconciled = DateTime.Today; // Обновляем дату на сегодня
-                            SaveData();      // Сохраняем базу
-                            RefreshGrid();   // Обновляем визуальную таблицу
+                            deposit.LastReconciled = DateTime.Today;
+                            SaveData();
+                            RefreshGrid();
                         }
                     }
                 }

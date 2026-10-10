@@ -16,7 +16,7 @@ namespace Учёт_Вкладов
         private CheckBox chkOPIF;
 
         private Label lblRate;
-        private NumericUpDown numRate; // Одно поле для всего!
+        private NumericUpDown numRate;
         private CheckBox chkIsKeyRateLinked;
 
         private ComboBox cmbPayout;
@@ -64,8 +64,17 @@ namespace Учёт_Вкладов
             y += 40;
             Label lblAmount = new Label { Text = "Сумма:", Location = new Point(20, y), AutoSize = true };
             this.Controls.Add(lblAmount);
-            numAmount = new NumericUpDown { Location = new Point(150, y - 3), Width = 120, Maximum = 1000000000, DecimalPlaces = 2 };
+
+            // НЕМНОГО УМЕНЬШИЛИ ШИРИНУ ПОЛЯ СУММЫ, ЧТОБЫ ВЛЕЗЛА КНОПКА
+            numAmount = new NumericUpDown { Location = new Point(150, y - 3), Width = 95, Maximum = 1000000000, DecimalPlaces = 2 };
             this.Controls.Add(numAmount);
+
+            // === НОВОЕ: КНОПКА КАЛЬКУЛЯТОРА ===
+            Button btnAdjust = new Button { Text = "±", Location = new Point(250, y - 4), Width = 25, Height = 23, Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
+            btnAdjust.Click += BtnAdjust_Click;
+            this.Controls.Add(btnAdjust);
+            // ===================================
+
             cmbCurrency = new ComboBox { Location = new Point(280, y - 3), Width = 100, DropDownStyle = ComboBoxStyle.DropDownList };
             cmbCurrency.Items.AddRange(new[] { "RUB", "USD", "EUR", "CNY" });
             this.Controls.Add(cmbCurrency);
@@ -78,8 +87,6 @@ namespace Учёт_Вкладов
             y += 35;
             lblRate = new Label { Text = "Ставка (%):", Location = new Point(20, y), AutoSize = true };
             this.Controls.Add(lblRate);
-
-            // ВАЖНО: Разрешаем отрицательные значения для надбавки (до -100)
             numRate = new NumericUpDown { Location = new Point(150, y - 3), Width = 80, DecimalPlaces = 2, Minimum = -100, Maximum = 1000 };
             this.Controls.Add(numRate);
 
@@ -113,13 +120,25 @@ namespace Учёт_Вкладов
             this.Controls.Add(btnSave);
         }
 
+        // === НОВОЕ: ЛОГИКА НАЖАТИЯ НА КНОПКУ КАЛЬКУЛЯТОРА ===
+        private void BtnAdjust_Click(object sender, EventArgs e)
+        {
+            using (var adjustForm = new AdjustAmountForm(numAmount.Value))
+            {
+                if (adjustForm.ShowDialog() == DialogResult.OK)
+                {
+                    numAmount.Value = adjustForm.NewAmount;
+                }
+            }
+        }
+        // ====================================================
+
         private void UpdateControlsState(object sender, EventArgs e)
         {
             bool isOpif = chkOPIF.Checked;
             bool isKeyRate = chkIsKeyRateLinked.Checked;
             bool isPerpetual = chkPerpetual.Checked;
 
-            // Меняем текст лейбла в зависимости от галочки КС
             lblRate.Text = isKeyRate ? "Надбавка к КС:" : "Ставка (%):";
 
             chkIsKeyRateLinked.Enabled = !isOpif;
@@ -160,8 +179,9 @@ namespace Учёт_Вкладов
             CurrentDeposit.Bank = cmbBank.Text;
             CurrentDeposit.Owner = cmbOwner.Text;
             CurrentDeposit.Amount = numAmount.Value;
-            CurrentDeposit.Currency = cmbCurrency.SelectedItem.ToString();
-            CurrentDeposit.PayoutType = cmbPayout.SelectedItem.ToString();
+
+            CurrentDeposit.Currency = cmbCurrency.SelectedItem?.ToString() ?? "RUB";
+            CurrentDeposit.PayoutType = cmbPayout.SelectedItem?.ToString() ?? "В конце срока (на счет)";
 
             CurrentDeposit.IsOPIF = chkOPIF.Checked;
 
@@ -170,17 +190,56 @@ namespace Учёт_Вкладов
 
             CurrentDeposit.StartDate = dtpStart.Value;
 
-            // Если ОПИФ или бессрочный, сохраняем пустую дату
             if (chkOPIF.Checked || chkPerpetual.Checked)
                 CurrentDeposit.EndDate = null;
             else
                 CurrentDeposit.EndDate = dtpEnd.Value;
 
             CurrentDeposit.IsPerpetual = chkPerpetual.Checked;
-
-            // Обновляем дату сверки при любом редактировании ===
             CurrentDeposit.LastReconciled = DateTime.Today;
+            CurrentDeposit.IsReconciledSession = true;
 
+            this.DialogResult = DialogResult.OK;
+            this.Close();
+        }
+    }
+
+    // === НОВЫЙ КЛАСС: ОКОШКО ДЛЯ ВВОДА СУММЫ ПОПОЛНЕНИЯ/СНЯТИЯ ===
+    public class AdjustAmountForm : Form
+    {
+        public decimal NewAmount { get; private set; }
+        private NumericUpDown numAdd;
+
+        public AdjustAmountForm(decimal currentAmount)
+        {
+            this.Text = "Изменение суммы";
+            this.Size = new Size(320, 160);
+            this.StartPosition = FormStartPosition.CenterParent;
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.MinimizeBox = false;
+
+            try { this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+            Label lbl = new Label { Text = $"Было на счету: {currentAmount:N2}\n\nПополнить на сумму (с минусом для снятия):", Location = new Point(20, 15), AutoSize = true };
+            this.Controls.Add(lbl);
+
+            numAdd = new NumericUpDown { Location = new Point(20, 75), Width = 150, Minimum = -1000000000, Maximum = 1000000000, DecimalPlaces = 2 };
+            // Позволяем нажать Enter для быстрого применения
+            numAdd.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; Apply(currentAmount); } };
+            this.Controls.Add(numAdd);
+
+            Button btnOk = new Button { Text = "Применить", Location = new Point(190, 73), Width = 90, Height = 25, BackColor = Color.LightGreen, FlatStyle = FlatStyle.Flat };
+            btnOk.Click += (s, e) => Apply(currentAmount);
+            this.Controls.Add(btnOk);
+
+            this.ActiveControl = numAdd;
+        }
+
+        private void Apply(decimal currentAmount)
+        {
+            NewAmount = currentAmount + numAdd.Value;
+            if (NewAmount < 0) NewAmount = 0; // Защита от отрицательного баланса
             this.DialogResult = DialogResult.OK;
             this.Close();
         }
